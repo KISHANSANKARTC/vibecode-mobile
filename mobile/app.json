@@ -1,0 +1,59 @@
+{
+  "expo": {
+    "name": "Engage App",
+    "slug": "engage-app",
+    "scheme": [
+      "vibecode",
+      "engage"
+    ],
+    "version": "1.0.7",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSPhotoLibraryAddUsageDescription": "Engage App saves media you export from the app into your photo library.",
+        "NSPhotoLibraryUsageDescription": "Engage App accesses your photo library to let you choose videos that appear in the app.",
+        "NSLocationWhenInUseUsageDescription": "Engage App uses your location to show nearby content and services while you use the app.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Engage App uses your location to keep your live location updated.",
+        "NSCameraUsageDescription": "Engage App uses the camera to capture photos inside the app before you publish them."
+      },
+      "bundleIdentifier": "co.engageapp.app",
+      "buildNumber": "14"
+    },
+    "android": {
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Engage App needs access to your gallery to save images.",
+          "savePhotosPermission": "Engage App needs permission to save images to your gallery.",
+          "isAccessMediaLocationEnabled": true
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Engage App uses your location to show nearby talent.",
+          "locationAlwaysPermission": "Engage App uses your location to keep your live location updated.",
+          "locationWhenInUsePermission": "Engage App uses your location to show nearby talent."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "icon": "./icon.png"
+  }
+}

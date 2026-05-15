@@ -1,0 +1,39 @@
+{
+  "cli": {
+    "version": "16.17.4"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": {
+        "simulator": true
+      }
+    },
+    "preview": {
+      "distribution": "internal"
+    },
+    "production": {
+      "env": {
+        "EXPO_PUBLIC_VIBECODE_BACKEND_URL": "https://frozen-jellyfish.vibecode.run",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "sb_publishable_4puFig35ChAyI2vsZcbYjQ_IWL9_tI8",
+        "EXPO_PUBLIC_SUPABASE_URL": "https://tghuqwogmnslvlbhchpu.supabase.co",
+        "BACKEND_URL": "https://frozen-jellyfish.vibecode.run",
+        "EXPO_PUBLIC_BACKEND_URL": "https://frozen-jellyfish.vibecode.run"
+      },
+      "ios": {
+        "distribution": "store"
+      },
+      "android": {
+        "distribution": "store"
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "ascAppId": "6757756513"
+      }
+    }
+  }
+}

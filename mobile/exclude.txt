@@ -1,0 +1,6 @@
+assets/categories/editors.png
+assets/categories/designers.png
+assets/categories/photo-video.png
+assets/categories/stylists.png
+assets/images/engage-logo.png
+assets/welcome-logo.png
