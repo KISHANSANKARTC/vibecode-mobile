@@ -33,6 +33,7 @@ import { useAuthStore } from '@/lib/state/auth-store';
 import { useTheme } from '@/lib/theme/ThemeContext';
 import { SkeletonLoader } from '@/components/SkeletonLoader';
 import { extractErrorMessage } from '@/lib/errorUtils';
+import { useStripeConnect } from '@/hooks/useStripeConnect';
 
 const COUNTRIES = [
   { code: 'AE', name: 'United Arab Emirates', currency: 'AED' },
@@ -162,6 +163,15 @@ export default function PayoutsScreen() {
     swift_code: '',
   });
   const [bankFormErrors, setBankFormErrors] = useState<{ [key: string]: string }>({});
+
+  // Stripe Connect — talent payout onboarding/dashboard/payout request
+  const {
+    isLoading: isConnectLoading,
+    status: connectStatus,
+    createConnectAccount,
+    openDashboard,
+    requestPayout,
+  } = useStripeConnect();
 
   const fetchData = useCallback(async () => {
     if (!user?.id) return;
@@ -602,6 +612,80 @@ export default function PayoutsScreen() {
         contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
       >
+        {/* Stripe Connect status banner */}
+        {!connectStatus?.hasAccount && (
+          <Pressable
+            disabled={isConnectLoading}
+            onPress={async () => {
+              const r = await createConnectAccount();
+              if (!r.ok && r.error) Alert.alert('Could not start onboarding', r.error);
+            }}
+            style={{
+              backgroundColor: accentColor,
+              paddingHorizontal: 16,
+              paddingVertical: 14,
+              borderRadius: 12,
+              marginBottom: 16,
+              opacity: isConnectLoading ? 0.6 : 1,
+            }}
+          >
+            <Text style={{ color: '#FFFFFF', textAlign: 'center', fontWeight: '600', fontSize: 15 }}>
+              Set up Stripe payouts
+            </Text>
+          </Pressable>
+        )}
+
+        {connectStatus?.hasAccount && !connectStatus?.payoutsEnabled && (
+          <View
+            style={{
+              backgroundColor: isDark ? 'rgba(245, 158, 11, 0.12)' : '#FEF3C7',
+              borderWidth: 1,
+              borderColor: isDark ? 'rgba(245, 158, 11, 0.4)' : '#FDE68A',
+              borderRadius: 12,
+              padding: 12,
+              marginBottom: 16,
+            }}
+          >
+            <Text style={{ color: isDark ? '#FCD34D' : '#92400E', fontSize: 13, marginBottom: 8 }}>
+              Stripe is reviewing your account. Some details may still be required.
+            </Text>
+            <Pressable
+              disabled={isConnectLoading}
+              onPress={async () => {
+                const r = await openDashboard();
+                if (!r.ok && r.error) Alert.alert('Could not open dashboard', r.error);
+              }}
+            >
+              <Text style={{ color: accentColor, fontWeight: '600' }}>
+                Open Stripe dashboard →
+              </Text>
+            </Pressable>
+          </View>
+        )}
+
+        {connectStatus?.payoutsEnabled && (
+          <Pressable
+            disabled={isConnectLoading}
+            onPress={async () => {
+              const r = await openDashboard();
+              if (!r.ok && r.error) Alert.alert('Could not open dashboard', r.error);
+            }}
+            style={{
+              backgroundColor: cardBg,
+              borderWidth: 1,
+              borderColor: borderColor,
+              paddingHorizontal: 16,
+              paddingVertical: 12,
+              borderRadius: 12,
+              marginBottom: 16,
+            }}
+          >
+            <Text style={{ color: textColor, textAlign: 'center', fontWeight: '600' }}>
+              Manage payouts in Stripe →
+            </Text>
+          </Pressable>
+        )}
+
         {/* Balance Cards */}
         <View style={{ flexDirection: 'row', gap: 12, marginBottom: 24 }}>
           {/* Total Earned */}

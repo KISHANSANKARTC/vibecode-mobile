@@ -157,10 +157,21 @@ export default function NotificationsScreen() {
     }
   };
 
-  // Mark all as read
+  // Mark all as read — persists to DB via the read_at timestamp column.
   const handleMarkAllAsRead = async () => {
-    // Just update local state since database doesn't support is_read
-    setUnreadCount(0);
+    if (!user?.id) return;
+    try {
+      const { error } = await supabase
+        .from('notifications')
+        .update({ read_at: new Date().toISOString() })
+        .eq('user_id', user.id)
+        .is('read_at', null);
+      if (error) throw error;
+      setUnreadCount(0);
+      await fetchNotifications();
+    } catch (err) {
+      console.error('[notifications] markAllAsRead failed:', getErrorMessage(err));
+    }
   };
 
   // Get notification icon and colors

@@ -17,23 +17,21 @@ export const useNotificationsStore = create<NotificationsStore>((set) => ({
     set((state) => ({ unreadCount: Math.max(0, state.unreadCount - 1) })),
   fetchUnreadCount: async () => {
     try {
-      // Get authenticated user
       const { data: authData } = await supabase.auth.getUser();
       const userId = authData?.user?.id;
 
       if (!userId) {
-        console.log('[notifications-store] No authenticated user');
         set({ unreadCount: 0 });
         return;
       }
 
-      console.log('[notifications-store] Fetching unread count for user:', userId);
-
-      // Query all notifications
+      // Count UNREAD notifications only (read_at IS NULL).
+      // The notifications table uses `read_at` (timestamptz) — there is no `is_read` column.
       const { count, error } = await supabase
         .from('notifications')
         .select('*', { count: 'exact', head: true })
-        .eq('user_id', userId);
+        .eq('user_id', userId)
+        .is('read_at', null);
 
       if (error) {
         console.warn('[notifications-store] Query error:', error.message || 'Unknown error');
@@ -41,7 +39,6 @@ export const useNotificationsStore = create<NotificationsStore>((set) => ({
         return;
       }
 
-      console.log('[notifications-store] ✅ Unread count:', count);
       set({ unreadCount: count || 0 });
     } catch (err) {
       console.warn('[notifications-store] Unexpected error:', err);

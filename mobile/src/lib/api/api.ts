@@ -1,32 +1,33 @@
 import { fetch } from "expo/fetch";
+import { supabase } from "@/lib/supabase";
 
 // Response envelope type - all app routes return { data: T }
 interface ApiResponse<T> {
   data: T;
 }
 
-const baseUrl = process.env.EXPO_PUBLIC_BACKEND_URL!;
-const SUPABASE_URL = "https://tghuqwogmnslvlbhchpu.supabase.co";
-const SUPABASE_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRnaHVxd29nbW5zbHZsYmhjaHB1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY1NTU5NjEsImV4cCI6MjA4MjEzMTk2MX0.sMeQfnfpKOURYbeq19B0MhUq4Mj0AcTbK27cjx1Anwc";
+const baseUrl = process.env.EXPO_PUBLIC_BACKEND_URL || "";
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || "";
 
-// Helper to safely extract error message from any object
-// Export so it can be used throughout the app
+// Helper to safely extract error message from any object.
+// Export so it can be used throughout the app.
 export const extractErrorMessage = (error: any): string => {
-  if (typeof error === 'string') {
-    // Check if the string looks like a stringified event object
-    if (error.includes('isTrusted') || error === '{"isTrusted":true}') {
-      return 'A network error occurred. Please check your connection and try again.';
+  if (typeof error === "string") {
+    if (error.includes("isTrusted") || error === '{"isTrusted":true}') {
+      return "A network error occurred. Please check your connection and try again.";
     }
     return error;
   }
   if (error instanceof Error) return error.message;
-  if (error && typeof error === 'object') {
-    // Detect event objects (has isTrusted property)
-    if ('isTrusted' in error) return 'A network error occurred. Please check your connection and try again.';
-    if (error.message && typeof error.message === 'string') return error.message;
-    if (error.error && typeof error.error === 'string') return error.error;
+  if (error && typeof error === "object") {
+    if ("isTrusted" in error) {
+      return "A network error occurred. Please check your connection and try again.";
+    }
+    if (error.message && typeof error.message === "string") return error.message;
+    if (error.error && typeof error.error === "string") return error.error;
   }
-  return 'An unexpected error occurred';
+  return "An unexpected error occurred";
 };
 
 const request = async <T>(
@@ -42,23 +43,19 @@ const request = async <T>(
       },
     });
 
-    // 1. Handle 204 No Content
     if (response.status === 204) {
       return undefined as T;
     }
 
-    // 2. JSON responses: parse and check for errors
     const contentType = response.headers.get("content-type");
     if (contentType?.includes("application/json")) {
       const json = await response.json();
 
-      // Check if response contains an error (backend error format)
       if (json && json.error) {
-        const errorMessage = json.error.message || json.error.code || 'An error occurred';
+        const errorMessage = json.error.message || json.error.code || "An error occurred";
         throw new Error(errorMessage);
       }
 
-      // If response is successful, unwrap { data }
       if (json && json.data !== undefined) {
         return json.data;
       }
@@ -66,74 +63,77 @@ const request = async <T>(
       return json as T;
     }
 
-    // 3. Non-JSON: check for error status
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
     return undefined as T;
   } catch (error) {
-    // Ensure we always throw an Error instance (not event objects)
     if (error instanceof Error) {
       throw error;
     }
-    const errorMessage = extractErrorMessage(error);
-    throw new Error(errorMessage);
+    throw new Error(extractErrorMessage(error));
   }
 };
 
-const supabaseRequest = async <T>(
-  functionName: string,
-  body: any
-): Promise<T> => {
+/**
+ * Call a Supabase Edge Function by name.
+ *
+ * For verify_jwt=true edge functions, the user's session access token is
+ * forwarded as Authorization: Bearer. For anonymous (verify_jwt=false)
+ * functions, only the anon key is sent.
+ *
+ * NOTE: Most callers should prefer `supabase.functions.invoke('<fn>', { body })`
+ * directly — it handles auth forwarding automatically. This wrapper exists
+ * for parity with `api.get/post/...`.
+ */
+const supabaseRequest = async <T>(functionName: string, body: any): Promise<T> => {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error(
+      "Supabase env vars missing. Check EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY."
+    );
+  }
+
   const url = `${SUPABASE_URL}/functions/v1/${functionName}`;
 
-  console.log(`[Supabase] Calling ${functionName} at ${url}`);
+  // Forward the user's session token when available so verify_jwt=true
+  // edge functions accept the request.
+  const { data: { session } } = await supabase.auth.getSession();
+  const authToken = session?.access_token || SUPABASE_ANON_KEY;
 
   try {
     const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "apikey": SUPABASE_API_KEY,
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${authToken}`,
       },
       body: JSON.stringify(body),
     });
 
-    console.log(`[Supabase] Response status: ${response.status}`);
-
     const contentType = response.headers.get("content-type");
     if (contentType?.includes("application/json")) {
       const json = await response.json();
-      console.log(`[Supabase] Response body:`, JSON.stringify(json, null, 2));
 
-      // Check if the response indicates an error
       if (!response.ok) {
-        console.error(`[Supabase] Error response: status ${response.status}`);
-        // Extract error message from various possible response structures
         let errorMessage = `Supabase error: ${response.status}`;
         let errorObj: any = null;
 
-        if (typeof json === 'object' && json !== null) {
+        if (typeof json === "object" && json !== null) {
           errorObj = json;
-          // Try nested error.message first (for backend error responses)
-          if ((json as any).error && typeof (json as any).error === 'object' && (json as any).error.message) {
-            errorMessage = (json as any).error.message;
-          } else if ((json as any).error && typeof (json as any).error === 'string') {
-            // If error is a string (Supabase format), use it directly
-            errorMessage = (json as any).error;
-          } else if (typeof json === 'object') {
-            errorMessage =
-              (json as any).message ||
-              (json as any).msg ||
-              (json as any).error_description ||
-              'Supabase error';
+          const j = json as any;
+          if (j.error && typeof j.error === "object" && j.error.message) {
+            errorMessage = j.error.message;
+          } else if (j.error && typeof j.error === "string") {
+            errorMessage = j.error;
+          } else {
+            errorMessage = j.message || j.msg || j.error_description || errorMessage;
           }
-        } else if (typeof json === 'string') {
+        } else if (typeof json === "string") {
           errorMessage = json;
         }
 
-        // Throw an Error instance with the extracted message
         const error = new Error(errorMessage);
         (error as any).originalError = errorObj;
         throw error;
@@ -143,19 +143,16 @@ const supabaseRequest = async <T>(
     }
 
     if (!response.ok) {
-      console.error(`[Supabase] Non-JSON error response: ${response.status}`);
       throw new Error(`Supabase error: ${response.status}`);
     }
 
     return undefined as T;
   } catch (error) {
-    // Ensure we always throw an Error instance
     const errorMessage = extractErrorMessage(error);
     console.error(`[Supabase] Error calling ${functionName}:`, errorMessage);
     throw new Error(errorMessage);
   }
 };
-
 
 export const api = {
   get: <T>(url: string) => request<T>(url),
@@ -167,7 +164,6 @@ export const api = {
   patch: <T>(url: string, body: any) =>
     request<T>(url, { method: "PATCH", body: JSON.stringify(body) }),
   supabase: {
-    post: <T>(functionName: string, body: any) =>
-      supabaseRequest<T>(functionName, body),
+    post: <T>(functionName: string, body: any) => supabaseRequest<T>(functionName, body),
   },
 };

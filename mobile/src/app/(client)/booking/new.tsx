@@ -34,6 +34,7 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { format } from 'date-fns';
 import { supabase } from '@/lib/supabase';
 import { extractErrorMessage } from '@/lib/errorUtils';
+import { useBookingPayment } from '@/hooks/useBookingPayment';
 
 type RateType = 'hourly' | 'session' | 'day' | 'project' | 'custom';
 
@@ -48,6 +49,7 @@ interface TalentInfo {
   currency: string;
   display_name: string;
   avatar_url: string | null;
+  instant_book_master_enabled: boolean | null;
 }
 
 interface PackageInfo {
@@ -56,6 +58,7 @@ interface PackageInfo {
   base_price: number;
   duration_hours: number | null;
   currency: string;
+  instant_book_enabled: boolean | null;
 }
 
 const ORANGE = '#FA5610';
@@ -179,6 +182,9 @@ export default function NewBookingScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
+  // Hosted Stripe Checkout for instant-book packages
+  const { payWithCard } = useBookingPayment();
+
   // Keyboard tracking — hide the sticky CTA so it can't cover inputs.
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   useEffect(() => {
@@ -211,7 +217,7 @@ export default function NewBookingScreen() {
         const { data: talentProfile, error: profileError } = await supabase
           .from('talent_profiles')
           .select(
-            'id, user_id, category, hourly_rate, session_rate, day_rate, project_rate, currency, display_name'
+            'id, user_id, category, hourly_rate, session_rate, day_rate, project_rate, currency, display_name, instant_book_master_enabled'
           )
           .eq('id', talentId)
           .maybeSingle();
@@ -246,12 +252,13 @@ export default function NewBookingScreen() {
           currency: talentProfile.currency || 'AED',
           display_name: fullName,
           avatar_url: avatarUrl,
+          instant_book_master_enabled: (talentProfile as any).instant_book_master_enabled ?? null,
         });
 
         if (packageId) {
           const { data: pkgData, error: pkgError } = await supabase
             .from('packages')
-            .select('id, name, base_price, duration_hours, currency')
+            .select('id, name, base_price, duration_hours, currency, instant_book_enabled')
             .eq('id', packageId)
             .maybeSingle();
           if (pkgError) throw pkgError;
@@ -262,6 +269,7 @@ export default function NewBookingScreen() {
               base_price: Number(pkgData.base_price) || 0,
               duration_hours: pkgData.duration_hours ?? null,
               currency: pkgData.currency || talentProfile.currency || 'AED',
+              instant_book_enabled: (pkgData as any).instant_book_enabled ?? null,
             });
 
             if (pkgData.duration_hours && pkgData.duration_hours > 0) {
@@ -509,6 +517,22 @@ export default function NewBookingScreen() {
 
       if (btError) throw btError;
 
+      // Instant-book packages go straight to Stripe Checkout. Non-instant
+      // bookings remain `pending` and require talent acceptance before
+      // payment is collected (existing behaviour).
+      const isInstantBook =
+        pkg?.instant_book_enabled === true &&
+        talent?.instant_book_master_enabled !== false;
+
+      if (isInstantBook) {
+        const payResult = await payWithCard(insertedBooking.id);
+        if (payResult.ok) {
+          router.replace(`/(client)/bookings/${insertedBooking.id}` as never);
+          return;
+        }
+        // Payment cancelled / failed — fall through to the standard pending flow.
+      }
+
       console.log('[BookNow] submit success', insertedBooking.id);
       router.replace(`/(client)/bookings/${insertedBooking.id}` as never);
     } catch (err) {
@@ -530,6 +554,7 @@ export default function NewBookingScreen() {
     currency,
     notes,
     router,
+    payWithCard,
   ]);
 
   if (isLoading) {

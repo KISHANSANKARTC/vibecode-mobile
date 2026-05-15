@@ -30,6 +30,9 @@ import { useState, useCallback, useEffect, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
 import { format, differenceInHours, isSameDay } from 'date-fns';
 import { useWorkCompletion } from '@/hooks/useWorkCompletion';
+import { useBookingPayment } from '@/hooks/useBookingPayment';
+import { useReschedule } from '@/hooks/useReschedule';
+import { usePDFGeneration } from '@/hooks/usePDFGeneration';
 import { ConfirmWorkCompletionDialog } from '@/components/ConfirmWorkCompletionDialog';
 import { extractErrorMessage } from '@/lib/errorUtils';
 
@@ -1175,43 +1178,41 @@ export default function BookingDetailScreen() {
     [id, bookingData, fetchBookingData]
   );
 
+  // Payment hooks — handles wallet debit + Stripe Checkout server-side via edge functions
+  const { isProcessing: isPayProcessing, payWithCard, payWithWallet, verifyPayment } = useBookingPayment();
+  const { isProcessing: isReschedProcessing, requestReschedule, acceptReschedule, declineReschedule } = useReschedule();
+  const { isGenerating: isPdfGenerating, generateContract, generateCallsheet, openPDF } = usePDFGeneration();
+
   // Payment handlers
   const handlePayWithWallet = useCallback(async () => {
     if (!id) return;
-
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Not authenticated');
-
-      // Update booking status to confirmed
-      const { error } = await supabase
-        .from('bookings')
-        .update({ status: 'confirmed' })
-        .eq('id', id);
-
-      if (error) throw error;
-
+    const result = await payWithWallet(id);
+    if (result.ok) {
       setPaymentDialogOpen(false);
       fetchBookingData();
-    } catch (err) {
-      const errorMsg = extractErrorMessage(err);
-      console.error('Error processing wallet payment:', errorMsg);
+    } else {
+      Alert.alert(
+        'Payment failed',
+        result.error || 'Could not complete wallet payment. Please try again or use a different method.'
+      );
     }
-  }, [id, fetchBookingData]);
+  }, [id, payWithWallet, fetchBookingData]);
 
   const handlePayWithCard = useCallback(async () => {
     if (!id) return;
-
-    try {
-      // Call Stripe edge function (placeholder)
-      console.log('Initiating card payment for booking:', id);
-      // TODO: Call create-checkout edge function
+    const result = await payWithCard(id);
+    if (result.ok) {
       setPaymentDialogOpen(false);
-    } catch (err) {
-      const errorMsg = extractErrorMessage(err);
-      console.error('Error initiating card payment:', errorMsg);
+      const confirmed = await verifyPayment(id);
+      if (confirmed) {
+        fetchBookingData();
+      } else {
+        setTimeout(() => fetchBookingData(), 2500);
+      }
+    } else if (result.error && result.error !== 'Payment was cancelled') {
+      Alert.alert('Payment failed', result.error);
     }
-  }, [id]);
+  }, [id, payWithCard, verifyPayment, fetchBookingData]);
 
   const handleDisputeSubmit = useCallback(async (disputeReason: string, disputeDetails: string) => {
     if (!id) return;

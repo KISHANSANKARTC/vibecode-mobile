@@ -10,6 +10,7 @@ import { ProjectChat } from '@/components/workspace/ProjectChat';
 import { ActionBanner } from '@/components/ActionBanner';
 import { ConfirmWorkCompletionDialog } from '@/components/ConfirmWorkCompletionDialog';
 import { useWorkCompletion } from '@/hooks/useWorkCompletion';
+import { useReschedule } from '@/hooks/useReschedule';
 import {
   ArrowLeft,
   BadgeCheck,

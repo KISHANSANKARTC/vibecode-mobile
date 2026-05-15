@@ -4,7 +4,10 @@ import type { User, Session, AuthError } from '@supabase/supabase-js';
 import { supabase } from '../supabase';
 import { extractErrorMessage } from '../errorUtils';
 
-export type UserRole = 'client' | 'talent';
+// IMPORTANT: includes 'admin' so admin users coming back from the DB don't get
+// silently coerced into the client/talent flow. Admin UI is web-only — the app
+// should show a "use the web dashboard" screen for admins (see ProtectedRoute).
+export type UserRole = 'client' | 'talent' | 'admin';
 
 interface AuthState {
   user: User | null;
@@ -23,6 +26,7 @@ interface AuthActions {
   signInWithApple: (redirectUrl: string) => Promise<{ error?: Error | null }>;
   signOut: () => Promise<void>;
   setUserRole: (role: UserRole) => Promise<void>;
+  refetchUserData: () => Promise<void>;
   initialize: () => Promise<void>;
   clearError: () => void;
 }
@@ -30,38 +34,84 @@ interface AuthActions {
 type AuthStore = AuthState & AuthActions;
 
 const USER_ROLE_KEY = 'engage_user_role';
+const REFERRAL_CODE_KEY = 'engage_referral_code';
+const SIGNUP_SOURCE_KEY = 'engage_signup_source';
 
-// Helper to format auth errors for users
 const formatAuthError = (error: AuthError): string => {
-  const errorMessage = error.message.toLowerCase();
-
-  if (errorMessage.includes('invalid login credentials')) {
-    return 'Invalid email or password. Please try again.';
-  }
-  if (errorMessage.includes('email not confirmed')) {
-    return 'Please check your email and confirm your account.';
-  }
-  if (errorMessage.includes('user already registered') || errorMessage.includes('already registered')) {
+  const msg = error.message.toLowerCase();
+  if (msg.includes('invalid login credentials')) return 'Invalid email or password. Please try again.';
+  if (msg.includes('email not confirmed')) return 'Please check your email and confirm your account.';
+  if (msg.includes('user already registered') || msg.includes('already registered')) {
     return 'An account with this email already exists. Try signing in instead.';
   }
-  if (errorMessage.includes('invalid email')) {
-    return 'Please enter a valid email address.';
-  }
-  if (errorMessage.includes('password') && errorMessage.includes('short')) {
-    return 'Password must be at least 6 characters long.';
-  }
-  if (errorMessage.includes('weak password')) {
-    return 'Please choose a stronger password (at least 6 characters).';
-  }
-  if (errorMessage.includes('network') || errorMessage.includes('fetch')) {
-    return 'Network error. Please check your connection and try again.';
-  }
-  if (errorMessage.includes('rate limit')) {
-    return 'Too many attempts. Please wait a moment and try again.';
-  }
-
+  if (msg.includes('invalid email')) return 'Please enter a valid email address.';
+  if (msg.includes('password') && msg.includes('short')) return 'Password must be at least 6 characters long.';
+  if (msg.includes('weak password')) return 'Please choose a stronger password (at least 6 characters).';
+  if (msg.includes('network') || msg.includes('fetch')) return 'Network error. Please check your connection and try again.';
+  if (msg.includes('rate limit')) return 'Too many attempts. Please wait a moment and try again.';
   return error.message;
 };
+
+/**
+ * Compute onboarding-complete status from the database.
+ * - Talent: `talent_profiles.onboarding_completed = true`
+ * - Client: `client_companies` row exists AND `profiles.phone` is set
+ * - Admin:  always true (admin onboarding is implicit)
+ */
+async function computeIsOnboardingComplete(userId: string, role: UserRole | null): Promise<boolean> {
+  if (!role) return false;
+  if (role === 'admin') return true;
+
+  if (role === 'talent') {
+    const { data } = await supabase
+      .from('talent_profiles')
+      .select('onboarding_completed')
+      .eq('user_id', userId)
+      .maybeSingle();
+    return data?.onboarding_completed === true;
+  }
+
+  if (role === 'client') {
+    const [companyRes, profileRes] = await Promise.all([
+      supabase.from('client_companies').select('id').eq('user_id', userId).maybeSingle(),
+      supabase.from('profiles').select('phone').eq('id', userId).maybeSingle(),
+    ]);
+    return !!companyRes.data && !!profileRes.data?.phone;
+  }
+
+  return false;
+}
+
+/**
+ * Process any pending referral signup. Reads code/source from AsyncStorage
+ * (deep-link handler should store them on app launch) and fires the
+ * process-referral-signup edge function. Failures are non-fatal.
+ */
+async function processPendingReferral(userId: string, role: UserRole) {
+  try {
+    const [referralCode, signupSource] = await Promise.all([
+      AsyncStorage.getItem(REFERRAL_CODE_KEY),
+      AsyncStorage.getItem(SIGNUP_SOURCE_KEY),
+    ]);
+    if (!referralCode && !signupSource) return;
+
+    await supabase.functions.invoke('process-referral-signup', {
+      body: {
+        newUserId: userId,
+        referralCode: referralCode || null,
+        signupSource: signupSource || 'organic',
+        newUserType: role,
+      },
+    });
+
+    await Promise.all([
+      AsyncStorage.removeItem(REFERRAL_CODE_KEY),
+      AsyncStorage.removeItem(SIGNUP_SOURCE_KEY),
+    ]);
+  } catch (err) {
+    console.warn('[auth-store] Referral processing skipped:', extractErrorMessage(err));
+  }
+}
 
 export const useAuthStore = create<AuthStore>((set, get) => ({
   user: null,
@@ -72,25 +122,19 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   isOnboardingComplete: false,
   error: null,
 
-  signUp: async (email: string, password: string, fullName?: string) => {
+  signUp: async (email, password, fullName) => {
     set({ isLoading: true, error: null });
-
     try {
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
-        options: {
-          data: {
-            full_name: fullName,
-            role: get().userRole,
-          },
-        },
+        options: { data: { full_name: fullName } },
       });
 
       if (error) {
-        const formattedError = formatAuthError(error);
-        set({ isLoading: false, error: formattedError });
-        return { success: false, error: formattedError };
+        const formatted = formatAuthError(error);
+        set({ isLoading: false, error: formatted });
+        return { success: false, error: formatted };
       }
 
       if (data.user) {
@@ -104,57 +148,38 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       }
 
       set({ isLoading: false });
-      return { success: true }; // Email confirmation may be required
+      return { success: true };
     } catch (err) {
-      const errorMessage = 'An unexpected error occurred. Please try again.';
-      set({ isLoading: false, error: errorMessage });
-      return { success: false, error: errorMessage };
+      const msg = 'An unexpected error occurred. Please try again.';
+      set({ isLoading: false, error: msg });
+      return { success: false, error: msg };
     }
   },
 
-  signIn: async (email: string, password: string) => {
+  signIn: async (email, password) => {
     set({ isLoading: true, error: null });
-
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
 
       if (error) {
-        const formattedError = formatAuthError(error);
-        set({ isLoading: false, error: formattedError });
-        return { success: false, error: formattedError };
+        const formatted = formatAuthError(error);
+        set({ isLoading: false, error: formatted });
+        return { success: false, error: formatted };
       }
 
       if (data.user && data.session) {
-        // Fetch actual role from database (source of truth)
         const { data: roleData } = await supabase
           .from('user_roles')
           .select('role')
           .eq('user_id', data.user.id)
           .order('created_at', { ascending: false })
           .limit(1)
-          .single();
+          .maybeSingle();
 
         const userRole = (roleData?.role as UserRole) ?? null;
+        const isOnboardingComplete = await computeIsOnboardingComplete(data.user.id, userRole);
 
-        // Check onboarding completion for talents
-        let isOnboardingComplete = true; // Default to true for non-talents
-        if (userRole === 'talent') {
-          const { data: profileData } = await supabase
-            .from('talent_profiles')
-            .select('onboarding_completed')
-            .eq('user_id', data.user.id)
-            .single();
-
-          isOnboardingComplete = profileData?.onboarding_completed === true;
-        }
-
-        // Store role in AsyncStorage for persistence
-        if (userRole) {
-          await AsyncStorage.setItem(USER_ROLE_KEY, userRole);
-        }
+        if (userRole) await AsyncStorage.setItem(USER_ROLE_KEY, userRole);
 
         set({
           user: data.user,
@@ -170,24 +195,23 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       set({ isLoading: false });
       return { success: false, error: 'Failed to sign in. Please try again.' };
     } catch (err) {
-      const errorMessage = 'An unexpected error occurred. Please try again.';
-      set({ isLoading: false, error: errorMessage });
-      return { success: false, error: errorMessage };
+      const msg = 'An unexpected error occurred. Please try again.';
+      set({ isLoading: false, error: msg });
+      return { success: false, error: msg };
     }
   },
 
   signOut: async () => {
     set({ isLoading: true });
-
     try {
       await supabase.auth.signOut();
       await AsyncStorage.removeItem(USER_ROLE_KEY);
-
       set({
         user: null,
         session: null,
         isAuthenticated: false,
         userRole: null,
+        isOnboardingComplete: false,
         isLoading: false,
         error: null,
       });
@@ -196,99 +220,117 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  signInWithGoogle: async (redirectUrl: string) => {
+  signInWithGoogle: async (redirectUrl) => {
     set({ isLoading: true, error: null });
-
     try {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
-        options: {
-          redirectTo: redirectUrl,
-        },
+        options: { redirectTo: redirectUrl },
       });
-
       if (error) {
-        const errorMessage = `Google sign-in error: ${error.message}`;
-        set({ isLoading: false, error: errorMessage });
+        const msg = `Google sign-in error: ${error.message}`;
+        set({ isLoading: false, error: msg });
         return { error };
       }
-
       set({ isLoading: false });
       return { error: null };
     } catch (err) {
       const error = err instanceof Error ? err : new Error('Unknown error');
-      const errorMessage = `Google sign-in error: ${error.message}`;
-      set({ isLoading: false, error: errorMessage });
+      set({ isLoading: false, error: `Google sign-in error: ${error.message}` });
       return { error };
     }
   },
 
-  signInWithApple: async (redirectUrl: string) => {
+  signInWithApple: async (redirectUrl) => {
     set({ isLoading: true, error: null });
-
     try {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'apple',
-        options: {
-          redirectTo: redirectUrl,
-          scopes: 'email name',
-        },
+        options: { redirectTo: redirectUrl, scopes: 'email name' },
       });
-
       if (error) {
-        const errorMessage = `Apple sign-in error: ${error.message}`;
-        set({ isLoading: false, error: errorMessage });
+        const msg = `Apple sign-in error: ${error.message}`;
+        set({ isLoading: false, error: msg });
         return { error };
       }
-
       set({ isLoading: false });
       return { error: null };
     } catch (err) {
       const error = err instanceof Error ? err : new Error('Unknown error');
-      const errorMessage = `Apple sign-in error: ${error.message}`;
-      set({ isLoading: false, error: errorMessage });
+      set({ isLoading: false, error: `Apple sign-in error: ${error.message}` });
       return { error };
     }
   },
 
-  setUserRole: async (role: UserRole) => {
+  setUserRole: async (role) => {
+    const user = get().user;
+    if (!user) {
+      // Defensive: only update local state if no user yet (pre-signup pending role).
+      await AsyncStorage.setItem(USER_ROLE_KEY, role);
+      set({ userRole: role });
+      return;
+    }
+
+    // Persist to DB (canonical source of truth). If an admin row exists we don't
+    // overwrite it from the client — admin can only be granted server-side.
+    const { error } = await supabase
+      .from('user_roles')
+      .upsert(
+        { user_id: user.id, role },
+        { onConflict: 'user_id,role' }
+      );
+
+    if (error) {
+      console.error('[auth-store] setUserRole error:', extractErrorMessage(error));
+    }
+
     await AsyncStorage.setItem(USER_ROLE_KEY, role);
-    set({ userRole: role });
+
+    // Process referral signup once we know the role (only for non-admin).
+    if (role !== 'admin') {
+      await processPendingReferral(user.id, role);
+    }
+
+    const isOnboardingComplete = await computeIsOnboardingComplete(user.id, role);
+    set({ userRole: role, isOnboardingComplete });
+  },
+
+  refetchUserData: async () => {
+    const user = get().user;
+    if (!user) return;
+
+    const { data: roleData } = await supabase
+      .from('user_roles')
+      .select('role')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const userRole = (roleData?.role as UserRole) ?? null;
+    const isOnboardingComplete = await computeIsOnboardingComplete(user.id, userRole);
+
+    if (userRole) await AsyncStorage.setItem(USER_ROLE_KEY, userRole);
+    set({ userRole, isOnboardingComplete });
   },
 
   initialize: async () => {
     try {
-      // Get current session
       const { data: { session } } = await supabase.auth.getSession();
 
       if (session?.user) {
-        // Fetch actual role from database (source of truth)
         const { data: roleData } = await supabase
           .from('user_roles')
           .select('role')
           .eq('user_id', session.user.id)
           .order('created_at', { ascending: false })
           .limit(1)
-          .single();
+          .maybeSingle();
 
         const userRole = (roleData?.role as UserRole) ?? null;
+        const isOnboardingComplete = await computeIsOnboardingComplete(session.user.id, userRole);
 
-        // Check onboarding completion for talents
-        let isOnboardingComplete = true; // Default to true for non-talents
-        if (userRole === 'talent') {
-          const { data: profileData } = await supabase
-            .from('talent_profiles')
-            .select('onboarding_completed')
-            .eq('user_id', session.user.id)
-            .single();
-
-          isOnboardingComplete = profileData?.onboarding_completed === true;
-        }
-
-        // Store in AsyncStorage if found
-        if (userRole) {
-          await AsyncStorage.setItem(USER_ROLE_KEY, userRole);
-        }
+        if (userRole) await AsyncStorage.setItem(USER_ROLE_KEY, userRole);
 
         set({
           user: session.user,
@@ -309,36 +351,21 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         });
       }
 
-      // Listen for auth state changes
       supabase.auth.onAuthStateChange(async (event, session) => {
         try {
           if (event === 'SIGNED_IN' && session?.user) {
-            // Fetch role from database on sign in
             const { data: roleData } = await supabase
               .from('user_roles')
               .select('role')
               .eq('user_id', session.user.id)
               .order('created_at', { ascending: false })
               .limit(1)
-              .single();
+              .maybeSingle();
 
             const userRole = (roleData?.role as UserRole) ?? null;
+            const isOnboardingComplete = await computeIsOnboardingComplete(session.user.id, userRole);
 
-            // Check onboarding completion for talents
-            let isOnboardingComplete = true;
-            if (userRole === 'talent') {
-              const { data: profileData } = await supabase
-                .from('talent_profiles')
-                .select('onboarding_completed')
-                .eq('user_id', session.user.id)
-                .single();
-
-              isOnboardingComplete = profileData?.onboarding_completed === true;
-            }
-
-            if (userRole) {
-              await AsyncStorage.setItem(USER_ROLE_KEY, userRole);
-            }
+            if (userRole) await AsyncStorage.setItem(USER_ROLE_KEY, userRole);
 
             set({
               user: session.user,
@@ -357,15 +384,18 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
               isOnboardingComplete: false,
             });
           } else if (event === 'TOKEN_REFRESHED' && session) {
-            set({
-              session,
-            });
+            set({ session });
           }
-        } catch {
-          // Silently handle auth state change errors to prevent {"isTrusted":true}
+        } catch (listenerErr) {
+          // Don't stringify event objects; log a useful message at debug level.
+          console.debug(
+            '[auth-store] onAuthStateChange listener error:',
+            extractErrorMessage(listenerErr)
+          );
         }
       });
     } catch (err) {
+      console.warn('[auth-store] initialize failed:', extractErrorMessage(err));
       set({ isLoading: false });
     }
   },
@@ -374,3 +404,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     set({ error: null });
   },
 }));
+
+// Public helper for deep-link / inbound URL handlers to record a referral.
+export async function storePendingReferral(referralCode?: string, signupSource?: string) {
+  if (referralCode) await AsyncStorage.setItem(REFERRAL_CODE_KEY, referralCode);
+  if (signupSource) await AsyncStorage.setItem(SIGNUP_SOURCE_KEY, signupSource);
+}
