@@ -1,5 +1,14 @@
+// Bootstrap side-effects — these MUST run before any other code touches them.
+// We use `main: "expo-router/entry"` in package.json so Expo Go's AppRegistry
+// finds the root-component registration directly (no index.js indirection).
+// That means these polyfills/styles need to be the FIRST imports of the root
+// layout, since expo-router loads this file as the first user code.
+import 'react-native-get-random-values';  // polyfill for crypto.getRandomValues (used by uuid + jose)
+import 'react-native-reanimated';          // worklet runtime registration
+import '../../global.css';                  // NativeWind/Tailwind global stylesheet
+
 import React, { useEffect, useState, useRef } from 'react';
-import { View, Text } from 'react-native';
+import { View, Text, LogBox } from 'react-native';
 import { Stack, router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { InteractionManager } from 'react-native';
@@ -7,6 +16,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useAuthStore } from '@/lib/state/auth-store';
 import { ThemeProvider as AppThemeProvider, useTheme } from '@/lib/theme/ThemeContext';
+
+LogBox.ignoreLogs(['Expo AV has been deprecated', 'Disconnected from Metro']);
 
 // Safely import KeyboardProvider - it may crash on some builds
 let KeyboardProviderComponent: React.ComponentType<{ children: React.ReactNode }> | null = null;
